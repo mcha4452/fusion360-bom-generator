@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Fusion 360 BOM Generator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/occweb@0.1.1/dist/occweb.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 20px; }
+        h1, h2 { color: #333; }
+        #fileInput { margin-bottom: 20px; }
+        .table-container { margin-bottom: 20px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        button { margin-top: 20px; padding: 10px; background-color: #4CAF50; color: white; border: none; cursor: pointer; }
+        button:hover { background-color: #45a049; }
+        .edit-mode input { width: 100%; box-sizing: border-box; }
+    </style>
+</head>
+<body>
+    <h1>Advanced Fusion 360 BOM Generator</h1>
+    <input type="file" id="fileInput" accept=".step,.stp">
+    <div id="bomContainer"></div>
+    <button id="exportButton" style="display: none;">Export to CSV</button>
+
+    <script>
+        document.getElementById('fileInput').addEventListener('change', handleFileSelect);
+        document.getElementById('exportButton').addEventListener('click', exportToCSV);
+
+        let globalBOM = [];
+
+        async function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = async function(e) {
+                    const contents = e.target.result;
+                    const components = await parseSTEPFile(contents);
+                    globalBOM = generateBOM(components);
+                    renderBOM(globalBOM);
+                    document.getElementById('exportButton').style.display = 'block';
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        }
+
+        async function parseSTEPFile(contents) {
+            await OCCTWeb.init();
+            const doc = await OCCTWeb.loadSTEP(contents);
+            const shapes = await doc.getShapes();
+            
+            const components = [];
+            for (const shape of shapes) {
+                const name = await shape.getName();
+                const type = categorizeComponent(name);
+                const volume = await shape.getVolume();
+                const boundingBox = await shape.getBoundingBox();
+                const material = await extractMaterial(shape);
+                if (type) {
+                    components.push({ 
+                        name, 
+                        type, 
+                        volume, 
+                        dimensions: calculateDimensions(boundingBox),
+                        material
+                    });
+                }
+            }
+            
+            return components;
+        }
+
+        function categorizeComponent(name) {
+            const lowercaseName = name.toLowerCase();
+            const categories = {
+                'Sheet Material': ['sheet', 'panel', 'board', 'plywood', 'mdf'],
+                'Hinge': ['hinge', 'pivot'],
+                'Drawer Runner': ['drawer.+runner', 'slide'],
+                'Lamello Cabineo': ['lamello', 'cabineo', 'connector']
+            };
+
+            for (const [category, keywords] of Object.entries(categories)) {
+                if (keywords.some(keyword => new RegExp(keyword).test(lowercaseName))) {
+                    return category;
+                }
+            }
+            return 'Other';
+        }
+
+        async function extractMaterial(shape) {
+            // This is a placeholder. In reality, you'd need to implement
+            // logic to extract material properties from the STEP file.
+            return 'Unknown';
+        }
+
+        function calculateDimensions(boundingBox) {
+            const width = boundingBox.maxX - boundingBox.minX;
+            const depth = boundingBox.maxY - boundingBox.minY;
+            const height = boundingBox.maxZ - boundingBox.minZ;
+            return `${width.toFixed(2)} x ${depth.toFixed(2)} x ${height.toFixed(2)}`;
+        }
+
+        function generateBOM(components) {
+            const bom = {};
+            components.forEach(component => {
+                const key = `${component.type}-${component.material}-${component.dimensions}`;
+                if (!bom[key]) {
+                    bom[key] = { ...component, quantity: 0 };
+                }
+                bom[key].quantity++;
+            });
+
+            return Object.values(bom);
+        }
+
+        function renderBOM(bom) {
+            const container = document.getElementById('bomContainer');
+            container.innerHTML = '';
+
+            const categories = _.groupBy(bom, 'type');
+
+            for (const [category, items] of Object.entries(categories)) {
+                const tableContainer = document.createElement('div');
+                tableContainer.className = 'table-container';
+                container.appendChild(tableContainer);
+
+                const heading = document.createElement('h2');
+                heading.textContent = category;
+                tableContainer.appendChild(heading);
+
+                const table = document.createElement('table');
+                tableContainer.appendChild(table);
+
+                const thead = document.createElement('thead');
+                table.appendChild(thead);
+                thead.innerHTML = `
+                    <tr>
+                        <th>Component</th>
+                        <th>Quantity</th>
+                        <th>Material</th>
+                        <th>Dimensions</th>
+                        <th>Actions</th>
+                    </tr>
+                `;
+
+                const tbody = document.createElement('tbody');
+                table.appendChild(tbody);
+
+                items.forEach((item, index) => {
+                    const row = tbody.insertRow();
+                    row.innerHTML = `
+                        <td>${item.name}</td>
+                        <td>${item.quantity}</td>
+                        <td>${item.material}</td>
+                        <td>${item.dimensions}</td>
+                        <td><button onclick="editRow(${index})">Edit</button></td>
+                    `;
+                });
+
+                if (category === 'Sheet Material') {
+                    const nestingResult = performSheetNesting(items);
+                    const nestingInfo = document.createElement('p');
+                    nestingInfo.textContent = `Optimized sheet usage: ${nestingResult.sheetsRequired} sheets required.`;
+                    tableContainer.appendChild(nestingInfo);
+                }
+            }
+        }
+
+        function editRow(index) {
+            const item = globalBOM[index];
+            const row = document.querySelectorAll('tbody tr')[index];
+            row.innerHTML = `
+                <td><input type="text" value="${item.name}"></td>
+                <td><input type="number" value="${item.quantity}"></td>
+                <td><input type="text" value="${item.material}"></td>
+                <td><input type="text" value="${item.dimensions}"></td>
+                <td>
+                    <button onclick="saveRow(${index})">Save</button>
+                    <button onclick="cancelEdit(${index})">Cancel</button>
+                </td>
+            `;
+            row.classList.add('edit-mode');
+        }
+
+        function saveRow(index) {
+            const row = document.querySelectorAll('tbody tr')[index];
+            const inputs = row.querySelectorAll('input');
+            globalBOM[index] = {
+                ...globalBOM[index],
+                name: inputs[0].value,
+                quantity: parseInt(inputs[1].value),
+                material: inputs[2].value,
+                dimensions: inputs[3].value
+            };
+            renderBOM(globalBOM);
+        }
+
+        function cancelEdit(index) {
+            renderBOM(globalBOM);
+        }
+
+        function performSheetNesting(sheetMaterials) {
+            // This is a simplified nesting algorithm. In reality, you'd want to use
+            // a more sophisticated algorithm for optimal sheet usage.
+            let totalArea = 0;
+            sheetMaterials.forEach(item => {
+                const [width, height] = item.dimensions.split('x').map(Number);
+                totalArea += width * height * item.quantity;
+            });
+            const standardSheetArea = 2400 * 1200; // Assuming a standard sheet size
+            const sheetsRequired = Math.ceil(totalArea / standardSheetArea);
+            return { sheetsRequired };
+        }
+
+        function exportToCSV() {
+            const csv = Papa.unparse(globalBOM);
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            if (navigator.msSaveBlob) {
+                navigator.msSaveBlob(blob, 'bom.csv');
+            } else {
+                link.href = URL.createObjectURL(blob);
+                link.download = 'bom.csv';
+                link.click();
+            }
+        }
+    </script>
+</body>
+</html>
